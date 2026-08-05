@@ -1,0 +1,26 @@
+from fastapi import HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+
+def error_response(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message}},
+    )
+
+
+async def unhandled_exception_handler(_: Request, __: Exception) -> JSONResponse:
+    return error_response(500, "internal", "An internal error occurred")
+
+
+async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    if exc.status_code == 404:
+        return error_response(404, "not_found", "The requested resource was not found")
+
+    message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return error_response(exc.status_code, "internal", message)
+
+
+async def validation_exception_handler(_: Request, __: RequestValidationError) -> JSONResponse:
+    return error_response(400, "invalid_json", "The request body is invalid")
