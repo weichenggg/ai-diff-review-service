@@ -15,6 +15,9 @@ async def unhandled_exception_handler(_: Request, __: Exception) -> JSONResponse
 
 
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    if exc.status_code == 401:
+        return error_response(401, "unauthorized", "Authentication is required")
+
     if exc.status_code == 404:
         return error_response(404, "not_found", "The requested resource was not found")
 

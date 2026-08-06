@@ -22,6 +22,7 @@ MAX_PAYLOAD_BYTES=1048576
 CHUNK_BYTES=65536
 MAX_CONCURRENT_JOBS=4
 RATE_LIMIT_PER_MINUTE=30
+API_TOKEN=development-token
 ```
 
 Run the service:
@@ -44,3 +45,13 @@ pytest
 ```
 
 Authentication and review-processing endpoints are intentionally not included in this foundation step.
+
+## Day 2 review endpoints
+
+All `/v1/*` endpoints require `Authorization: Bearer <API_TOKEN>`. The default
+local token is `development-token` and may be overridden with `API_TOKEN`.
+
+- `POST /v1/reviews` creates an in-memory queued review job and returns `202`.
+- `GET /v1/reviews/{jobId}` returns the stored job status.
+
+Jobs are deliberately only queued at this stage; processing is not yet implemented.

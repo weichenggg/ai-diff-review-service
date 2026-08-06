@@ -1,8 +1,11 @@
+from typing import Literal
+from uuid import UUID
+
 from pydantic import BaseModel
 
 
 class HealthResponse(BaseModel):
-    status: str = "ok"
+    status: Literal["ok"] = "ok"
     version: str
     uptimeSeconds: float
 
@@ -15,15 +18,26 @@ class LimitsResponse(BaseModel):
 
 
 class SpecResponse(BaseModel):
-    specVersion: str = "1.0"
-    providers: list[str] = ["mock", "llm"]
+    specVersion: Literal["1.0"] = "1.0"
+    providers: list[Literal["mock", "llm"]] = ["mock", "llm"]
     limits: LimitsResponse
 
 
-class ErrorDetail(BaseModel):
-    code: str
-    message: str
+class ReviewOptions(BaseModel):
+    provider: Literal["mock", "llm"] = "mock"
+    maxFindings: int = 100
 
 
-class ErrorResponse(BaseModel):
-    error: ErrorDetail
+class CreateReviewRequest(BaseModel):
+    diff: str
+    options: ReviewOptions = ReviewOptions()
+
+
+class CreateReviewResponse(BaseModel):
+    jobId: UUID
+    status: Literal["queued"] = "queued"
+
+
+class ReviewStatusResponse(BaseModel):
+    jobId: UUID
+    status: Literal["queued", "running", "done", "failed"]

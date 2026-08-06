@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     chunk_bytes: int = 65_536
     max_concurrent_jobs: int = 4
     rate_limit_per_minute: int = 30
+    api_token: str = "development-token"
 
     model_config = SettingsConfigDict(
         env_file=".env",
