@@ -1,8 +1,18 @@
 import time
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    status,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.exceptions import RequestValidationError
 
@@ -28,6 +38,8 @@ from app.models import (
 async def lifespan(app: FastAPI):
     app.state.started_at = time.monotonic()
     app.state.jobs = {}
+    app.state.result_cache = {}
+    app.state.idempotency_keys = {}
     yield
 
 
@@ -113,13 +125,41 @@ async def spec() -> SpecResponse:
     dependencies=[Depends(require_bearer_token)],
 )
 async def create_review(
+    http_request: Request,
     request: CreateReviewRequest,
     background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> CreateReviewResponse:
+    body_hash = sha256(await http_request.body()).hexdigest()
+
+    if idempotency_key is not None:
+        prior_request = app.state.idempotency_keys.get(idempotency_key)
+        if prior_request is not None:
+            if prior_request["bodyHash"] != body_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was already used with a different request body",
+                )
+            return CreateReviewResponse(jobId=prior_request["jobId"])
+
     job_id = uuid4()
+    cached_job_id = app.state.result_cache.get(body_hash)
     job: dict[str, object] = {"jobId": job_id, "status": "queued"}
+
+    if cached_job_id is not None:
+        job["cacheSourceJobId"] = cached_job_id
+
     app.state.jobs[job_id] = job
-    if request.options.provider == "mock":
+    if idempotency_key is not None:
+        app.state.idempotency_keys[idempotency_key] = {
+            "bodyHash": body_hash,
+            "jobId": job_id,
+        }
+
+    if cached_job_id is None:
+        app.state.result_cache[body_hash] = job_id
+
+    if cached_job_id is None and request.options.provider == "mock":
         background_tasks.add_task(
             process_review_job,
             job,
@@ -139,6 +179,22 @@ async def get_review(job_id: UUID) -> ReviewStatusResponse:
     job = app.state.jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="The requested resource was not found")
+
+    source_job_id = job.get("cacheSourceJobId")
+    if source_job_id is not None:
+        source_job = app.state.jobs.get(source_job_id)
+        if source_job is not None:
+            response: dict[str, object] = {
+                "jobId": job_id,
+                "status": source_job["status"],
+            }
+            if source_job["status"] == "done":
+                usage = dict(source_job["usage"])
+                usage["cacheHit"] = True
+                response["findings"] = source_job["findings"]
+                response["usage"] = usage
+            return ReviewStatusResponse(**response)
+
     return ReviewStatusResponse(**job)
 
 

@@ -21,6 +21,10 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
     if exc.status_code == 404:
         return error_response(404, "not_found", "The requested resource was not found")
 
+    if exc.status_code == 409:
+        message = exc.detail if isinstance(exc.detail, str) else "Idempotency key conflict"
+        return error_response(409, "idempotency_conflict", message)
+
     message = exc.detail if isinstance(exc.detail, str) else "Request failed"
     return error_response(exc.status_code, "internal", message)
 

@@ -43,7 +43,7 @@ class CreateReviewResponse(BaseModel):
 class UsageResponse(BaseModel):
     inputBytes: int
     chunks: Literal[1] = 1
-    cacheHit: Literal[False] = False
+    cacheHit: bool = False
 
 
 class ReviewStatusResponse(BaseModel):

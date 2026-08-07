@@ -1,15 +1,29 @@
 import asyncio
+import json
 from uuid import UUID
 
-from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 
 from app import main as main_module
-from app.main import app, create_review, process_review_job
-from app.models import CreateReviewRequest, ReviewOptions
+from app.main import app, process_review_job
 
 
 AUTH_HEADERS = {"Authorization": "Bearer development-token"}
+
+
+def review_body(diff: str, *, max_findings: int = 100) -> bytes:
+    return json.dumps(
+        {"diff": diff, "options": {"provider": "mock", "maxFindings": max_findings}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def post_review(client: TestClient, body: bytes, **headers: str):
+    return client.post(
+        "/v1/reviews",
+        content=body,
+        headers={**AUTH_HEADERS, "Content-Type": "application/json", **headers},
+    )
 
 
 def test_v1_routes_require_a_bearer_token() -> None:
@@ -22,26 +36,66 @@ def test_v1_routes_require_a_bearer_token() -> None:
     }
 
 
-def test_job_lifecycle_is_queued_before_background_processing_then_done() -> None:
-    with TestClient(app):
-        tasks = BackgroundTasks()
-        response = asyncio.run(
-            create_review(
-                CreateReviewRequest(diff="@@ -1 +1 @@\n+console.log('x');"),
-                tasks,
-            )
+def test_post_returns_queued_before_background_processing_completes() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/reviews",
+            headers=AUTH_HEADERS,
+            json={"diff": "@@ -1 +1 @@\n+console.log('x');"},
         )
-        job = app.state.jobs[response.jobId]
 
-        assert response.model_dump(mode="json") == {
-            "jobId": str(response.jobId),
-            "status": "queued",
-        }
-        assert job["status"] == "queued"
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
 
-        asyncio.run(tasks())
 
-        assert job["status"] == "done"
+def test_identical_request_without_idempotency_key_reuses_cached_result() -> None:
+    diff = """diff --git a/a.ts b/a.ts
+--- a/a.ts
++++ b/a.ts
+@@ -1 +1 @@
++console.log(eval(input));
+"""
+    body = review_body(diff)
+    with TestClient(app) as client:
+        first = post_review(client, body)
+        second = post_review(client, body)
+        first_result = client.get(f"/v1/reviews/{first.json()['jobId']}", headers=AUTH_HEADERS)
+        second_result = client.get(f"/v1/reviews/{second.json()['jobId']}", headers=AUTH_HEADERS)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["jobId"] != second.json()["jobId"]
+    assert first_result.json()["usage"]["cacheHit"] is False
+    assert second_result.json()["usage"]["cacheHit"] is True
+    assert second_result.json()["findings"] == first_result.json()["findings"]
+
+
+def test_same_idempotency_key_and_body_returns_the_original_job_id() -> None:
+    body = review_body("@@ -1 +1 @@\n+console.log('x');")
+    with TestClient(app) as client:
+        first = post_review(client, body, **{"Idempotency-Key": "request-123"})
+        repeated = post_review(client, body, **{"Idempotency-Key": "request-123"})
+
+    assert first.status_code == repeated.status_code == 202
+    assert repeated.json() == first.json()
+
+
+def test_same_idempotency_key_and_different_body_returns_conflict() -> None:
+    with TestClient(app) as client:
+        initial = post_review(
+            client,
+            review_body("@@ -1 +1 @@\n+console.log('first');"),
+            **{"Idempotency-Key": "request-123"},
+        )
+        conflict = post_review(
+            client,
+            review_body("@@ -1 +1 @@\n+console.log('second');"),
+            **{"Idempotency-Key": "request-123"},
+        )
+
+    assert initial.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+    assert "different request body" in conflict.json()["error"]["message"]
 
 
 def test_processor_transitions_to_running_before_it_parses(monkeypatch) -> None:
