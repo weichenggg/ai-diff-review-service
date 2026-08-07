@@ -43,3 +43,26 @@ def parse_added_lines(diff: str) -> list[AddedLine]:
             new_file_line_number += 1
 
     return added_lines
+
+
+def parse_added_lines_by_file(diff: str) -> dict[str, list[AddedLine]]:
+    """Group parsed added lines by the new-file path in a unified diff."""
+    files: dict[str, list[AddedLine]] = {}
+    path: str | None = None
+    file_lines: list[str] = []
+
+    def store_current_file() -> None:
+        if path is not None:
+            files[path] = parse_added_lines("\n".join(file_lines))
+
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            store_current_file()
+            raw_path = line[4:].split("\t", maxsplit=1)[0]
+            path = raw_path.removeprefix("b/")
+            file_lines = []
+        elif path is not None:
+            file_lines.append(line)
+
+    store_current_file()
+    return files

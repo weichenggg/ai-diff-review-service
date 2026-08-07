@@ -2,16 +2,18 @@ import time
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.exceptions import RequestValidationError
 
 from app.config import get_settings
+from app.diff_parser import parse_added_lines_by_file
 from app.errors import (
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
+from app.mock_review_engine import Finding, review_added_lines
 from app.models import (
     HealthResponse,
     CreateReviewRequest,
@@ -52,6 +54,34 @@ async def require_bearer_token(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+async def process_review_job(
+    job: dict[str, object],
+    diff: str,
+    max_findings: int,
+) -> None:
+    """Run deterministic mock review processing without letting failures escape."""
+    try:
+        job["status"] = "running"
+        findings: list[Finding] = []
+        for path, added_lines in parse_added_lines_by_file(diff).items():
+            findings.extend(review_added_lines(path, added_lines))
+
+        unique_findings = {finding.id: finding for finding in findings}
+        ordered_findings = sorted(
+            unique_findings.values(),
+            key=lambda finding: (finding.path, finding.line, finding.ruleId),
+        )
+        job["findings"] = ordered_findings[:max_findings]
+        job["usage"] = {
+            "inputBytes": len(diff.encode("utf-8")),
+            "chunks": 1,
+            "cacheHit": False,
+        }
+        job["status"] = "done"
+    except Exception:
+        job["status"] = "failed"
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     settings = get_settings()
@@ -82,15 +112,27 @@ async def spec() -> SpecResponse:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_bearer_token)],
 )
-async def create_review(request: CreateReviewRequest) -> CreateReviewResponse:
+async def create_review(
+    request: CreateReviewRequest,
+    background_tasks: BackgroundTasks,
+) -> CreateReviewResponse:
     job_id = uuid4()
-    app.state.jobs[job_id] = {"jobId": job_id, "status": "queued"}
+    job: dict[str, object] = {"jobId": job_id, "status": "queued"}
+    app.state.jobs[job_id] = job
+    if request.options.provider == "mock":
+        background_tasks.add_task(
+            process_review_job,
+            job,
+            request.diff,
+            request.options.maxFindings,
+        )
     return CreateReviewResponse(jobId=job_id)
 
 
 @v1_router.get(
     "/reviews/{job_id}",
     response_model=ReviewStatusResponse,
+    response_model_exclude_none=True,
     dependencies=[Depends(require_bearer_token)],
 )
 async def get_review(job_id: UUID) -> ReviewStatusResponse:

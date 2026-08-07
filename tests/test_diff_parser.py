@@ -1,4 +1,4 @@
-from app.diff_parser import AddedLine, parse_added_lines
+from app.diff_parser import AddedLine, parse_added_lines, parse_added_lines_by_file
 
 
 def test_extracts_added_lines_at_their_new_file_line_numbers() -> None:
@@ -53,3 +53,22 @@ def test_preserves_additions_that_begin_with_a_plus_character() -> None:
 """
 
     assert parse_added_lines(diff) == [AddedLine(lineNumber=1, content="+value")]
+
+
+def test_groups_added_lines_by_new_file_path() -> None:
+    diff = """diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1 +1 @@
++first
+diff --git a/b.py b/b.py
+--- a/b.py
++++ b/b.py
+@@ -4 +4 @@
++second
+"""
+
+    assert parse_added_lines_by_file(diff) == {
+        "a.py": [AddedLine(lineNumber=1, content="first")],
+        "b.py": [AddedLine(lineNumber=4, content="second")],
+    }

@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from app.mock_review_engine import Finding
+
 
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
@@ -38,6 +40,14 @@ class CreateReviewResponse(BaseModel):
     status: Literal["queued"] = "queued"
 
 
+class UsageResponse(BaseModel):
+    inputBytes: int
+    chunks: Literal[1] = 1
+    cacheHit: Literal[False] = False
+
+
 class ReviewStatusResponse(BaseModel):
     jobId: UUID
     status: Literal["queued", "running", "done", "failed"]
+    findings: list[Finding] | None = None
+    usage: UsageResponse | None = None
