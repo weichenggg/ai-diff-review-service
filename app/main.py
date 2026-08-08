@@ -1,3 +1,4 @@
+import asyncio
 import time
 from contextlib import asynccontextmanager
 from hashlib import sha256
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
     app.state.jobs = {}
     app.state.result_cache = {}
     app.state.idempotency_keys = {}
+    app.state.review_semaphore = asyncio.Semaphore(get_settings().max_concurrent_jobs)
     yield
 
 
@@ -67,34 +69,43 @@ async def require_bearer_token(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def compute_review_result(diff: str, max_findings: int) -> tuple[list[Finding], dict[str, object]]:
+    """Run the CPU-bound parse and mock-review work for one job."""
+    findings: list[Finding] = []
+    chunks = chunk_unified_diff(diff)
+    for chunk in chunks:
+        for path, added_lines in parse_added_lines_by_file(chunk).items():
+            findings.extend(review_added_lines(path, added_lines))
+
+    unique_findings = {finding.id: finding for finding in findings}
+    ordered_findings = sorted(
+        unique_findings.values(),
+        key=lambda finding: (finding.path, finding.line, finding.ruleId),
+    )
+    return ordered_findings[:max_findings], {
+        "inputBytes": len(diff.encode("utf-8")),
+        "chunks": len(chunks),
+        "cacheHit": False,
+    }
+
+
 async def process_review_job(
     job: dict[str, object],
     diff: str,
     max_findings: int,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> None:
-    """Run deterministic mock review processing without letting failures escape."""
-    try:
+    """Process one job once a review-processing slot is available."""
+    active_semaphore = semaphore or asyncio.Semaphore(1)
+    async with active_semaphore:
         job["status"] = "running"
-        findings: list[Finding] = []
-        chunks = chunk_unified_diff(diff)
-        for chunk in chunks:
-            for path, added_lines in parse_added_lines_by_file(chunk).items():
-                findings.extend(review_added_lines(path, added_lines))
-
-        unique_findings = {finding.id: finding for finding in findings}
-        ordered_findings = sorted(
-            unique_findings.values(),
-            key=lambda finding: (finding.path, finding.line, finding.ruleId),
-        )
-        job["findings"] = ordered_findings[:max_findings]
-        job["usage"] = {
-            "inputBytes": len(diff.encode("utf-8")),
-            "chunks": len(chunks),
-            "cacheHit": False,
-        }
-        job["status"] = "done"
-    except Exception:
-        job["status"] = "failed"
+        try:
+            findings, usage = await asyncio.to_thread(compute_review_result, diff, max_findings)
+            job["findings"] = findings
+            job["usage"] = usage
+            job["status"] = "done"
+        except Exception:
+            job["status"] = "failed"
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -168,6 +179,7 @@ async def create_review(
             job,
             request.diff,
             request.options.maxFindings,
+            app.state.review_semaphore,
         )
     return CreateReviewResponse(jobId=job_id)
 
