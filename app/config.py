@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     max_concurrent_jobs: int = 4
     rate_limit_per_minute: int = 30
     api_token: str = "development-token"
+    api_tokens: str = ""
+
+    @property
+    def valid_api_tokens(self) -> set[str]:
+        return {self.api_token, *filter(None, (token.strip() for token in self.api_tokens.split(",")))}
 
     model_config = SettingsConfigDict(
         env_file=".env",

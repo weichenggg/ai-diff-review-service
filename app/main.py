@@ -1,7 +1,9 @@
 import asyncio
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from hashlib import sha256
+from math import ceil
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -43,6 +45,7 @@ async def lifespan(app: FastAPI):
     app.state.result_cache = {}
     app.state.idempotency_keys = {}
     app.state.review_semaphore = asyncio.Semaphore(get_settings().max_concurrent_jobs)
+    app.state.rate_limit_requests = {}
     yield
 
 
@@ -64,9 +67,35 @@ v1_router = APIRouter(prefix="/v1")
 
 async def require_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> None:
-    if credentials is None or credentials.credentials != get_settings().api_token:
+) -> str:
+    if credentials is None or credentials.credentials not in get_settings().valid_api_tokens:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    return credentials.credentials
+
+
+async def enforce_review_rate_limit(
+    request: Request,
+    bearer_token: str = Depends(require_bearer_token),
+) -> None:
+    """Apply a per-token sliding-window limit to review submissions only."""
+    now = time.monotonic()
+    window_start = now - 60
+    request_times: deque[float] = app.state.rate_limit_requests.setdefault(
+        bearer_token,
+        deque(),
+    )
+    while request_times and request_times[0] <= window_start:
+        request_times.popleft()
+
+    if len(request_times) >= get_settings().rate_limit_per_minute:
+        retry_after = max(1, ceil(request_times[0] + 60 - now))
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded; retry after the indicated delay",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    request_times.append(now)
 
 
 def compute_review_result(diff: str, max_findings: int) -> tuple[list[Finding], dict[str, object]]:
@@ -136,7 +165,7 @@ async def spec() -> SpecResponse:
     "/reviews",
     response_model=CreateReviewResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_bearer_token)],
+    dependencies=[Depends(enforce_review_rate_limit)],
 )
 async def create_review(
     http_request: Request,

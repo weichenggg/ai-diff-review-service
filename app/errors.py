@@ -3,10 +3,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
-def error_response(status_code: int, code: str, message: str) -> JSONResponse:
+def error_response(
+    status_code: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message}},
+        headers=headers,
     )
 
 
@@ -24,6 +30,10 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
     if exc.status_code == 409:
         message = exc.detail if isinstance(exc.detail, str) else "Idempotency key conflict"
         return error_response(409, "idempotency_conflict", message)
+
+    if exc.status_code == 429:
+        message = exc.detail if isinstance(exc.detail, str) else "Rate limit exceeded"
+        return error_response(429, "rate_limited", message, headers=exc.headers)
 
     message = exc.detail if isinstance(exc.detail, str) else "Request failed"
     return error_response(exc.status_code, "internal", message)
