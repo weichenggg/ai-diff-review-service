@@ -31,6 +31,14 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
         message = exc.detail if isinstance(exc.detail, str) else "Idempotency key conflict"
         return error_response(409, "idempotency_conflict", message)
 
+    if exc.status_code == 413:
+        message = exc.detail if isinstance(exc.detail, str) else "Payload too large"
+        return error_response(413, "payload_too_large", message)
+
+    if exc.status_code == 422:
+        message = exc.detail if isinstance(exc.detail, str) else "Invalid unified diff"
+        return error_response(422, "invalid_diff", message)
+
     if exc.status_code == 429:
         message = exc.detail if isinstance(exc.detail, str) else "Rate limit exceeded"
         return error_response(429, "rate_limited", message, headers=exc.headers)

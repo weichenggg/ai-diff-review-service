@@ -31,7 +31,7 @@ class ReviewOptions(BaseModel):
 
 
 class CreateReviewRequest(BaseModel):
-    diff: str
+    diff: str | None = None
     options: ReviewOptions = ReviewOptions()
 
 

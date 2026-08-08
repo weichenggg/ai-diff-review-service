@@ -53,40 +53,43 @@ def create_completed_job(client: TestClient) -> str:
 def test_completed_job_replays_full_event_history_in_order() -> None:
     with TestClient(app) as client:
         job_id = create_completed_job(client)
-        response = client.get(f"/v1/reviews/{job_id}/events", headers=AUTH_HEADERS)
+        response = client.get(f"/v1/reviews/{job_id}/stream", headers=AUTH_HEADERS)
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     events = parse_sse_events(response.text)
     assert [event["event"] for event in events] == [
-        "queued",
-        "started",
+        "status",
+        "status",
         "finding",
-        "completed",
+        "done",
     ]
     assert [event["id"] for event in events] == [1, 2, 3, 4]
     assert events[2]["data"]["id"] == "MOCK-001:a.ts:1"  # type: ignore[index]
-    assert events[-1]["data"]["usage"]["cacheHit"] is False  # type: ignore[index]
+    assert events[-1]["data"] == {  # type: ignore[index]
+        "total": 1,
+        "usage": {"inputBytes": len(review_diff().encode("utf-8")), "chunks": 1, "cacheHit": False},
+    }
 
 
 def test_last_event_id_replays_only_later_events() -> None:
     with TestClient(app) as client:
         job_id = create_completed_job(client)
         response = client.get(
-            f"/v1/reviews/{job_id}/events",
+            f"/v1/reviews/{job_id}/stream",
             headers={**AUTH_HEADERS, "Last-Event-ID": "2"},
         )
 
     events = parse_sse_events(response.text)
     assert [event["id"] for event in events] == [3, 4]
-    assert [event["event"] for event in events] == ["finding", "completed"]
+    assert [event["event"] for event in events] == ["finding", "done"]
 
 
 def test_live_subscription_receives_events_until_completion() -> None:
     async def receive_live_events() -> list[dict[str, object]]:
         job: dict[str, object] = {"status": "queued"}
         initialize_job_events(job)
-        emit_job_event(job, "queued", {"status": "queued"})
+        emit_job_event(job, "status", {"status": "queued"})
         stream = stream_job_events(job, last_event_id=0)
 
         first_event = await anext(stream)
@@ -98,10 +101,10 @@ def test_live_subscription_receives_events_until_completion() -> None:
     events = asyncio.run(receive_live_events())
 
     assert [event["event"] for event in events] == [
-        "queued",
-        "started",
+        "status",
+        "status",
         "finding",
-        "completed",
+        "done",
     ]
 
 
@@ -114,13 +117,14 @@ def test_failed_job_emits_failed_event_and_stream_terminates(monkeypatch) -> Non
     async def receive_failed_events() -> list[dict[str, object]]:
         job: dict[str, object] = {"status": "queued"}
         initialize_job_events(job)
-        emit_job_event(job, "queued", {"status": "queued"})
+        emit_job_event(job, "status", {"status": "queued"})
         await process_review_job(job, "diff", 100)
         return parse_sse_events("".join([event async for event in stream_job_events(job, 0)]))
 
     events = asyncio.run(receive_failed_events())
 
-    assert [event["event"] for event in events] == ["queued", "started", "failed"]
+    assert [event["event"] for event in events] == ["status", "status", "status"]
+    assert events[-1]["data"]["status"] == "failed"  # type: ignore[index]
     assert "forced failure" in events[-1]["data"]["error"]  # type: ignore[index]
 
 
@@ -133,8 +137,8 @@ def test_cached_job_has_its_own_replayable_event_history() -> None:
             json={"diff": review_diff()},
         )
         cached_job_id = cached.json()["jobId"]
-        source_events = client.get(f"/v1/reviews/{source_job_id}/events", headers=AUTH_HEADERS)
-        cached_events = client.get(f"/v1/reviews/{cached_job_id}/events", headers=AUTH_HEADERS)
+        source_events = client.get(f"/v1/reviews/{source_job_id}/stream", headers=AUTH_HEADERS)
+        cached_events = client.get(f"/v1/reviews/{cached_job_id}/stream", headers=AUTH_HEADERS)
 
     source_history = parse_sse_events(source_events.text)
     cached_history = parse_sse_events(cached_events.text)
@@ -145,7 +149,7 @@ def test_cached_job_has_its_own_replayable_event_history() -> None:
 
 def test_unauthorized_event_stream_returns_401() -> None:
     with TestClient(app) as client:
-        response = client.get(f"/v1/reviews/{uuid4()}/events")
+        response = client.get(f"/v1/reviews/{uuid4()}/stream")
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "unauthorized"

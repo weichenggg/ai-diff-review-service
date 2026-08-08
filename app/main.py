@@ -22,10 +22,11 @@ from fastapi import (
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.chunking import chunk_unified_diff
 from app.config import get_settings
-from app.diff_parser import parse_added_lines_by_file
+from app.diff_parser import HUNK_HEADER_PATTERN, parse_added_lines_by_file
 from app.errors import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -60,6 +61,7 @@ app = FastAPI(
 
 app.add_exception_handler(Exception, unhandled_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(
     RequestValidationError,
     validation_exception_handler,
@@ -82,6 +84,9 @@ async def enforce_review_rate_limit(
     bearer_token: str = Depends(require_bearer_token),
 ) -> None:
     """Apply a per-token sliding-window limit to review submissions only."""
+    if len(await request.body()) > get_settings().max_payload_bytes:
+        raise HTTPException(status_code=413, detail="Request body exceeds the maximum payload size")
+
     now = time.monotonic()
     window_start = now - 60
     request_times: deque[float] = app.state.rate_limit_requests.setdefault(
@@ -127,7 +132,7 @@ def emit_job_event(job: dict[str, object], event_type: str, data: dict[str, obje
         if alias_job is None:
             continue
         alias_data = copy.deepcopy(data)
-        if event_type == "completed":
+        if event_type == "done":
             usage = dict(alias_data["usage"])
             usage["cacheHit"] = True
             alias_data["usage"] = usage
@@ -139,7 +144,7 @@ def copy_source_events_to_cached_job(source_job: dict[str, object], cached_job: 
     source_events: list[dict[str, object]] = source_job.get("events", [])  # type: ignore[assignment]
     for event in source_events:
         data = copy.deepcopy(event["data"])
-        if event["event"] == "completed":
+        if event["event"] == "done":
             usage = dict(data["usage"])
             usage["cacheHit"] = True
             data["usage"] = usage
@@ -165,14 +170,17 @@ async def stream_job_events(job: dict[str, object], last_event_id: int) -> objec
                 continue
             next_event_id = event["id"] + 1
             yield format_sse_event(event)
-            if event["event"] in {"completed", "failed"}:
+            if event["event"] == "done" or event["data"].get("status") == "failed":
                 return
 
         event_signal: asyncio.Event = job["eventSignal"]  # type: ignore[assignment]
         event_signal.clear()
         if len(events) >= next_event_id:
             continue
-        if events and events[-1]["event"] in {"completed", "failed"}:
+        if events and (
+            events[-1]["event"] == "done"
+            or events[-1]["data"].get("status") == "failed"
+        ):
             return
         await event_signal.wait()
 
@@ -207,7 +215,7 @@ async def process_review_job(
     active_semaphore = semaphore or asyncio.Semaphore(1)
     async with active_semaphore:
         job["status"] = "running"
-        emit_job_event(job, "started", {"status": "running"})
+        emit_job_event(job, "status", {"status": "running"})
         try:
             findings, usage = await asyncio.to_thread(compute_review_result, diff, max_findings)
             job["findings"] = findings
@@ -215,12 +223,16 @@ async def process_review_job(
             job["status"] = "done"
             for finding in findings:
                 emit_job_event(job, "finding", asdict(finding))
-            emit_job_event(job, "completed", {"status": "done", "usage": usage})
+            emit_job_event(
+                job,
+                "done",
+                {"total": len(findings), "usage": usage},
+            )
         except Exception as exc:
             job["status"] = "failed"
             error = f"Processing failed: {exc}"
             job["error"] = error
-            emit_job_event(job, "failed", {"status": "failed", "error": error})
+            emit_job_event(job, "status", {"status": "failed", "error": error})
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -261,6 +273,11 @@ async def create_review(
 ) -> CreateReviewResponse:
     body_hash = sha256(await http_request.body()).hexdigest()
 
+    if request.diff is None or not request.diff.strip() or not any(
+        HUNK_HEADER_PATTERN.match(line) for line in request.diff.splitlines()
+    ):
+        raise HTTPException(status_code=422, detail="diff must be a parseable unified diff")
+
     if idempotency_key is not None:
         prior_request = app.state.idempotency_keys.get(idempotency_key)
         if prior_request is not None:
@@ -288,7 +305,7 @@ async def create_review(
 
     if cached_job_id is None:
         app.state.result_cache[body_hash] = job_id
-        emit_job_event(job, "queued", {"status": "queued"})
+        emit_job_event(job, "status", {"status": "queued"})
     else:
         source_job = app.state.jobs[cached_job_id]
         initialize_job_events(source_job)
@@ -336,10 +353,10 @@ async def get_review(job_id: UUID) -> ReviewStatusResponse:
 
 
 @v1_router.get(
-    "/reviews/{job_id}/events",
+    "/reviews/{job_id}/stream",
     dependencies=[Depends(require_bearer_token)],
 )
-async def review_events(
+async def review_stream(
     job_id: UUID,
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
