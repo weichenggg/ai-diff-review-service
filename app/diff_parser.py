@@ -4,7 +4,7 @@ import re #powerful search tool
 from dataclasses import dataclass
 
 
-HUNK_HEADER_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+HUNK_HEADER_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@") #create regex once
 
 
 @dataclass(frozen=True) #create class automatically, frozen because parser result never change

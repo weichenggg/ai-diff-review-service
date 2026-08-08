@@ -16,6 +16,7 @@ from fastapi import (
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.exceptions import RequestValidationError
 
+from app.chunking import chunk_unified_diff
 from app.config import get_settings
 from app.diff_parser import parse_added_lines_by_file
 from app.errors import (
@@ -75,8 +76,10 @@ async def process_review_job(
     try:
         job["status"] = "running"
         findings: list[Finding] = []
-        for path, added_lines in parse_added_lines_by_file(diff).items():
-            findings.extend(review_added_lines(path, added_lines))
+        chunks = chunk_unified_diff(diff)
+        for chunk in chunks:
+            for path, added_lines in parse_added_lines_by_file(chunk).items():
+                findings.extend(review_added_lines(path, added_lines))
 
         unique_findings = {finding.id: finding for finding in findings}
         ordered_findings = sorted(
@@ -86,7 +89,7 @@ async def process_review_job(
         job["findings"] = ordered_findings[:max_findings]
         job["usage"] = {
             "inputBytes": len(diff.encode("utf-8")),
-            "chunks": 1,
+            "chunks": len(chunks),
             "cacheHit": False,
         }
         job["status"] = "done"
