@@ -23,6 +23,9 @@ CHUNK_BYTES=65536
 MAX_CONCURRENT_JOBS=4
 RATE_LIMIT_PER_MINUTE=30
 API_TOKEN=development-token
+LLM_API_KEY=
+LLM_API_URL=https://api.openai.com/v1/chat/completions
+LLM_MODEL=gpt-4.1-mini
 ```
 
 Run the service:

@@ -26,7 +26,7 @@ class SpecResponse(BaseModel):
 
 
 class ReviewOptions(BaseModel):
-    provider: Literal["mock", "llm"] = "mock"
+    provider: str = "mock"
     maxFindings: int = 100
 
 
@@ -51,3 +51,4 @@ class ReviewStatusResponse(BaseModel):
     status: Literal["queued", "running", "done", "failed"]
     findings: list[Finding] | None = None
     usage: UsageResponse | None = None
+    error: str | None = None

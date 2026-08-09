@@ -35,6 +35,10 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
         message = exc.detail if isinstance(exc.detail, str) else "Payload too large"
         return error_response(413, "payload_too_large", message)
 
+    if exc.status_code == 400:
+        message = exc.detail if isinstance(exc.detail, str) else "Invalid provider"
+        return error_response(400, "invalid_provider", message)
+
     if exc.status_code == 422:
         message = exc.detail if isinstance(exc.detail, str) else "Invalid unified diff"
         return error_response(422, "invalid_diff", message)

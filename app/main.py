@@ -26,13 +26,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.chunking import chunk_unified_diff
 from app.config import get_settings
-from app.diff_parser import HUNK_HEADER_PATTERN, parse_added_lines_by_file
+from app.diff_parser import HUNK_HEADER_PATTERN
 from app.errors import (
     http_exception_handler,
     unhandled_exception_handler,
     validation_exception_handler,
 )
-from app.mock_review_engine import Finding, review_added_lines
+from app.mock_review_engine import Finding
 from app.models import (
     HealthResponse,
     CreateReviewRequest,
@@ -41,6 +41,7 @@ from app.models import (
     ReviewStatusResponse,
     SpecResponse,
 )
+from app.providers import create_review_provider
 
 
 @asynccontextmanager
@@ -185,13 +186,15 @@ async def stream_job_events(job: dict[str, object], last_event_id: int) -> objec
         await event_signal.wait()
 
 
-def compute_review_result(diff: str, max_findings: int) -> tuple[list[Finding], dict[str, object]]:
-    """Run the CPU-bound parse and mock-review work for one job."""
-    findings: list[Finding] = []
+def compute_review_result(
+    diff: str,
+    max_findings: int,
+    provider_name: str = "mock",
+) -> tuple[list[Finding], dict[str, object]]:
+    """Run one provider over chunks and apply the shared result pipeline."""
     chunks = chunk_unified_diff(diff)
-    for chunk in chunks:
-        for path, added_lines in parse_added_lines_by_file(chunk).items():
-            findings.extend(review_added_lines(path, added_lines))
+    provider = create_review_provider(provider_name, get_settings())
+    findings = provider.review_chunks(chunks)
 
     unique_findings = {finding.id: finding for finding in findings}
     ordered_findings = sorted(
@@ -210,6 +213,7 @@ async def process_review_job(
     diff: str,
     max_findings: int,
     semaphore: asyncio.Semaphore | None = None,
+    provider_name: str = "mock",
 ) -> None:
     """Process one job once a review-processing slot is available."""
     active_semaphore = semaphore or asyncio.Semaphore(1)
@@ -217,7 +221,15 @@ async def process_review_job(
         job["status"] = "running"
         emit_job_event(job, "status", {"status": "running"})
         try:
-            findings, usage = await asyncio.to_thread(compute_review_result, diff, max_findings)
+            if provider_name == "mock":
+                findings, usage = await asyncio.to_thread(compute_review_result, diff, max_findings)
+            else:
+                findings, usage = await asyncio.to_thread(
+                    compute_review_result,
+                    diff,
+                    max_findings,
+                    provider_name,
+                )
             job["findings"] = findings
             job["usage"] = usage
             job["status"] = "done"
@@ -277,6 +289,8 @@ async def create_review(
         HUNK_HEADER_PATTERN.match(line) for line in request.diff.splitlines()
     ):
         raise HTTPException(status_code=422, detail="diff must be a parseable unified diff")
+    if request.options.provider not in {"mock", "llm"}:
+        raise HTTPException(status_code=400, detail="Unsupported review provider")
 
     if idempotency_key is not None:
         prior_request = app.state.idempotency_keys.get(idempotency_key)
@@ -312,13 +326,14 @@ async def create_review(
         source_job["cacheAliases"].append(job_id)  # type: ignore[index]
         copy_source_events_to_cached_job(source_job, job)
 
-    if cached_job_id is None and request.options.provider == "mock":
+    if cached_job_id is None:
         background_tasks.add_task(
             process_review_job,
             job,
             request.diff,
             request.options.maxFindings,
             app.state.review_semaphore,
+            request.options.provider,
         )
     return CreateReviewResponse(jobId=job_id)
 
@@ -347,6 +362,8 @@ async def get_review(job_id: UUID) -> ReviewStatusResponse:
                 usage["cacheHit"] = True
                 response["findings"] = source_job["findings"]
                 response["usage"] = usage
+            elif source_job["status"] == "failed":
+                response["error"] = source_job.get("error")
             return ReviewStatusResponse(**response)
 
     return ReviewStatusResponse(**job)

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 30
     api_token: str = "development-token"
     api_tokens: str = ""
+    llm_api_key: str = ""
+    llm_api_url: str = "https://api.openai.com/v1/chat/completions"
+    llm_model: str = "gpt-4.1-mini"
 
     @property
     def valid_api_tokens(self) -> set[str]:

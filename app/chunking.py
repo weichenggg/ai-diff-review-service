@@ -16,7 +16,7 @@ def split_file_diffs(diff: str) -> list[str]:
             if line.startswith("--- ") and lines[index + 1].startswith("+++ ")
         ]
     if not starts:
-        return [diff]
+        return [diff]  
 
     sections: list[str] = []
     for section_index, start in enumerate(starts):

@@ -101,11 +101,11 @@ def test_same_idempotency_key_and_different_body_returns_conflict() -> None:
 def test_processor_transitions_to_running_before_it_parses(monkeypatch) -> None:
     job: dict[str, object] = {"status": "queued"}
 
-    def observe_running_state(_: str) -> dict[str, list[object]]:
+    def observe_running_state(_: str, __: int) -> tuple[list[object], dict[str, object]]:
         assert job["status"] == "running"
-        return {}
+        return [], {"inputBytes": 0, "chunks": 1, "cacheHit": False}
 
-    monkeypatch.setattr(main_module, "parse_added_lines_by_file", observe_running_state)
+    monkeypatch.setattr(main_module, "compute_review_result", observe_running_state)
 
     asyncio.run(process_review_job(job, "diff", max_findings=100))
 
@@ -241,10 +241,10 @@ def test_usage_input_bytes_is_the_utf8_encoded_diff_length() -> None:
 
 
 def test_processing_failure_marks_the_job_as_failed(monkeypatch) -> None:
-    def raise_unexpected_error(_: str) -> dict[str, list[object]]:
-        raise RuntimeError("forced parser failure")
+    def raise_unexpected_error(_: str, __: int) -> tuple[list[object], dict[str, object]]:
+        raise RuntimeError("forced processing failure")
 
-    monkeypatch.setattr(main_module, "parse_added_lines_by_file", raise_unexpected_error)
+    monkeypatch.setattr(main_module, "compute_review_result", raise_unexpected_error)
     job: dict[str, object] = {"status": "queued"}
 
     asyncio.run(process_review_job(job, "diff", max_findings=100))
